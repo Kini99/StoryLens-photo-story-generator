@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+import mongoose from 'mongoose';
 
 const storySchema = new mongoose.Schema({
   user: {
@@ -6,12 +6,15 @@ const storySchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
-  title: {
+  imagePath: {
     type: String,
-    required: true,
-    trim: true
+    required: true
   },
-  imageUrl: {
+  audioPath: {
+    type: String,
+    required: true
+  },
+  caption: {
     type: String,
     required: true
   },
@@ -19,15 +22,10 @@ const storySchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  audioUrl: {
-    type: String
-  },
   createdAt: {
     type: Date,
     default: Date.now
   }
 });
 
-const Story = mongoose.model('Story', storySchema);
-
-module.exports = Story; 
+export default mongoose.model('Story', storySchema); 

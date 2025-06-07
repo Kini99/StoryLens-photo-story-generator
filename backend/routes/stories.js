@@ -1,131 +1,129 @@
-const express = require('express');
-const router = express.Router();
-const multer = require('multer');
-const path = require('path');
-const { PythonShell } = require('python-shell');
-const auth = require('../middleware/auth');
-const Story = require('../models/Story');
+import express from "express";
+import { promises as fs } from "fs";
+import multer from "multer";
+import path from "path";
+import { fileURLToPath } from "url";
+import imageService from "../services/imageService.js";
+import ttsService from "../services/ttsService.js";
 
-// Configure multer for file upload
+const router = express.Router();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const uploadDir = path.join(__dirname, "../uploads");
+
+// Configure multer for image upload
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/');
+  destination: async (req, file, cb) => {
+    try {
+      await fs.mkdir(uploadDir, { recursive: true });
+      cb(null, uploadDir);
+    } catch (error) {
+      console.error("Error creating upload directory:", error);
+      cb(error);
+    }
   },
   filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
-  }
+    cb(null, `${Date.now()}-${file.originalname}`);
+  },
 });
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  },
   fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
-    if (extname && mimetype) {
-      return cb(null, true);
+    const allowedTypes = ["image/jpeg", "image/png", "image/jpg", "image/webp"];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error(
+          "Invalid file type. Only JPEG, PNG, JPG, and WebP are allowed."
+        )
+      );
     }
-    cb(new Error('Only .png, .jpg and .jpeg format allowed!'));
-  }
+  },
 });
 
-// Create new story
-router.post('/upload', auth, upload.single('image'), async (req, res) => {
+// Upload photo and generate story (text only)
+router.post("/upload", upload.single("image"), async (req, res) => {
+  let uploadedImagePath = null;
   try {
     if (!req.file) {
-      return res.status(400).json({ message: 'Please upload an image' });
+      return res.status(400).json({ error: "No image file provided" });
     }
 
-    const imageUrl = `/uploads/${req.file.filename}`;
+    uploadedImagePath = req.file.path;
+
+    console.log(`Received image upload: ${uploadedImagePath}`);
+
+    // Generate story from image
+    const { caption, story } = await imageService.generateStory(uploadedImagePath);
+
+    res.status(201).json({
+      message: "Story generated successfully",
+      caption,
+      story,
+    });
+
+  } catch (error) {
+    console.error("Error in image upload or story generation:", error);
+    res.status(500).json({ error: "Failed to generate story" });
+  } finally {
+    // Clean up uploaded image file
+    if (uploadedImagePath) {
+      try {
+        await fs.unlink(uploadedImagePath);
+        console.log(`Deleted uploaded image: ${uploadedImagePath}`);
+      } catch (cleanupError) {
+        console.error(`Error deleting uploaded image ${uploadedImagePath}:`, cleanupError);
+      }
+    }
+  }
+});
+
+// Generate audio for a given story text
+router.post("/generate-audio", async (req, res) => {
+  const { storyText } = req.body;
+  if (!storyText) {
+    return res.status(400).json({ error: "No story text provided" });
+  }
+
+  let audioPath = null;
+  try {
+    // Generate audio narration
+    const audioFileName = `${Date.now()}.wav`;
+    audioPath = path.join(uploadDir, audioFileName);
     
-    // Generate story using Kosmos-2
-    const options = {
-      mode: 'text',
-      pythonPath: 'python',
-      pythonOptions: ['-u'],
-      scriptPath: './scripts',
-      args: [imageUrl, process.env.KOSMOS_API_KEY]
-    };
+    console.log(`Generating audio for story and saving to ${audioPath}`);
+    await ttsService.generateSpeech(storyText, audioPath);
+    console.log('Audio generation successful.');
 
-    PythonShell.run('generate_story.py', options).then(async (results) => {
-      const story = results[0];
-
-      // Generate audio using XTTS-v2
-      const audioOptions = {
-        mode: 'text',
-        pythonPath: 'python',
-        pythonOptions: ['-u'],
-        scriptPath: './scripts',
-        args: [story, process.env.COQUI_API_KEY]
-      };
-
-      PythonShell.run('generate_audio.py', audioOptions).then(async (audioResults) => {
-        const audioUrl = audioResults[0];
-
-        // Save story to database
-        const newStory = new Story({
-          user: req.user._id,
-          title: req.body.title || 'Untitled Story',
-          imageUrl,
-          story,
-          audioUrl
-        });
-
-        await newStory.save();
-        res.status(201).json(newStory);
-      });
-    });
-  } catch (error) {
-    res.status(500).json({ message: 'Error creating story' });
-  }
-});
-
-// Get user's stories
-router.get('/', auth, async (req, res) => {
-  try {
-    const stories = await Story.find({ user: req.user._id })
-      .sort({ createdAt: -1 });
-    res.json(stories);
-  } catch (error) {
-    res.status(500).json({ message: 'Error fetching stories' });
-  }
-});
-
-// Get specific story
-router.get('/:id', auth, async (req, res) => {
-  try {
-    const story = await Story.findOne({
-      _id: req.params.id,
-      user: req.user._id
+    res.status(200).json({
+      message: "Audio generated successfully",
+      audioPath: audioFileName // Return just the filename
     });
 
-    if (!story) {
-      return res.status(404).json({ message: 'Story not found' });
+  } catch (error) {
+    console.error("Error in audio generation:", error);
+    res.status(500).json({ error: "Failed to generate audio" });
+  } finally {
+    // Clean up generated audio file after a delay to allow frontend to fetch it
+    if (audioPath) {
+      // A short delay might be necessary to ensure the frontend has time to fetch the file
+      // In a production environment, a more robust approach like a temporary file service or streaming would be better
+      setTimeout(async () => {
+        try {
+          await fs.unlink(audioPath);
+          console.log(`Deleted generated audio: ${audioPath}`);
+        } catch (cleanupError) {
+          console.error(`Error deleting generated audio ${audioPath}:`, cleanupError);
+        }
+      }, 60000); // Delay deletion by 60 seconds
     }
-
-    res.json(story);
-  } catch (error) {
-    res.status(500).json({ message: 'Error fetching story' });
   }
 });
 
-// Delete story
-router.delete('/:id', auth, async (req, res) => {
-  try {
-    const story = await Story.findOneAndDelete({
-      _id: req.params.id,
-      user: req.user._id
-    });
-
-    if (!story) {
-      return res.status(404).json({ message: 'Story not found' });
-    }
-
-    res.json({ message: 'Story deleted successfully' });
-  } catch (error) {
-    res.status(500).json({ message: 'Error deleting story' });
-  }
-});
-
-module.exports = router; 
+export default router;
